@@ -112,10 +112,10 @@
 
 /*
  * Layout of the fuses providing the calibration data
- * These macros could be used for MT8173, MT2701, and MT2712.
- * MT8173 has 5 sensors and needs 5 VTS calibration data.
- * MT2701 has 3 sensors and needs 3 VTS calibration data.
- * MT2712 has 4 sensors and needs 4 VTS calibration data.
+ * These macros could be used for both MT8173, MT2701, and MT2712.
+ * MT8173 has five sensors and need five VTS calibration data,
+ * and MT2701 has three sensors and need three VTS calibration data,
+ * and MT2712 has four sensors and need four VTS calibration data.
  */
 #define MT8173_CALIB_BUF0_VALID		BIT(0)
 #define MT8173_CALIB_BUF1_ADC_GE(x)	(((x) >> 22) & 0x3ff)
