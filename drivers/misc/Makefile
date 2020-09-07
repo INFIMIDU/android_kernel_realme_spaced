@@ -67,6 +67,11 @@ obj-$(CONFIG_AW8697_HAPTIC)		+= aw8697_haptic/
 obj-$(CONFIG_SIM_DETECT)	+= sim_detect.o
 #endif
 
+#ifdef OPLUS_ARCH_EXTEND
+#JianBin.Zhang@PSW.MM.Display.LCD.Stability, 2020/05/14,modify for display decouping
+obj-$(CONFIG_MTK_FB)		+= oplus/
+#endif
+
 obj-$(CONFIG_BATTERY_SAVER)	+= battery_saver.o
 lkdtm-$(CONFIG_LKDTM)		+= lkdtm_core.o
 lkdtm-$(CONFIG_LKDTM)		+= lkdtm_bugs.o
