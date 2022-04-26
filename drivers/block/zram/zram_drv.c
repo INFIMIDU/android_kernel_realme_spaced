@@ -43,7 +43,9 @@ static DEFINE_MUTEX(zram_index_mutex);
 
 static int zram_major;
 static struct zram *zram_devices;
-static const char *default_compressor = "lzo";
+static char *default_compressor = CONFIG_ZRAM_DEF_COMP;
+
+module_param(default_compressor, charp, 0644);
 
 /* Module params (documentation at end) */
 static unsigned int num_devices = 1;
