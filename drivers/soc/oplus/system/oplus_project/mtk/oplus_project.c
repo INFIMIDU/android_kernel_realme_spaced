@@ -544,7 +544,11 @@ static void dump_secure_stage(struct seq_file *s)
     seq_printf(s, "%d", secure_oem_config);
 }
 
+<<<<<<< HEAD
 static void update_manifest(struct proc_dir_entry *parent)
+=======
+static void __init update_manifest(struct proc_dir_entry *parent_1, struct proc_dir_entry *parent_2)
+>>>>>>> 44e082c974b3 (kernel: Fix Section mismatches)
 {
     static const char* manifest_src[2] = {
         "/vendor/odm/etc/vintf/manifest_ssss.xml",

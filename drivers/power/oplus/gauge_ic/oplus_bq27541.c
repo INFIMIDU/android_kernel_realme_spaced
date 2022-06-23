@@ -970,7 +970,26 @@ static int bq27541_get_average_current(void)
 	return -curr;
 }
 
-static bool bq27541_sha1_hmac_authenticate(void);
+static int bq27541_sha1_hmac_authenticate(struct bq27541_authenticate_data *authenticate_data);
+
+static bool __init bq27541_get_battery_hmac(void)
+{
+	if (!gauge_ic) {
+		return true;
+	}
+
+	if(gauge_ic->batt_bq28z610) {
+		//		return bq27541_is_authenticate_OK(gauge_ic);
+		get_smem_batt_info(&auth_data, 1);
+		if (init_gauge_auth(&auth_data, gauge_ic->authenticate_data))
+			return true;
+		pr_info("%s:gauge authenticate failed, try again\n");
+		get_smem_batt_info(&auth_data, 0);
+		return init_gauge_auth(&auth_data, gauge_ic->authenticate_data);
+	} else {
+		return true;
+	}
+}
 
 static bool bq27541_get_battery_authenticate(void)
 {
@@ -2209,12 +2228,45 @@ static int bq28z610_get_2cell_voltage(void)
 	return 0;
 }
 
-#ifdef OPLUS_SHA1_HMAC
-/* export variables from SHA1_HMAC.c */
-extern UINT8  Message[RANDMESGNUMBYTES];	// Random message
-extern UINT8  Key[SECRETKEYNUMBYTES];		// Secret key
-extern UINT32 H[5];
-extern UINT32 Digest_32[5];					// Result of SHA1/HMAC obtained by MCU is contained here
+/*static int bq28z610_get_2cell_balance_time(void)
+{
+	u8 balance_time[BQ28Z610_MAC_CELL_BALANCE_TIME_SIZE] = {0,0,0,0};
+
+	bq27541_i2c_txsubcmd(BQ28Z610_MAC_CELL_BALANCE_TIME_EN_ADDR, BQ28Z610_MAC_CELL_BALANCE_TIME_CMD);
+	usleep_range(1000, 1000);
+	bq27541_read_i2c_block(BQ28Z610_MAC_CELL_BALANCE_TIME_ADDR, BQ28Z610_MAC_CELL_BALANCE_TIME_SIZE, balance_time);
+	pr_err("Cell_balance_time_remaining1 = %dS, Cell_balance_time_remaining2 = %dS\n", 
+	(balance_time[1] << 8) | balance_time[0], (balance_time[3] << 8) | balance_time[2]);
+
+	return 0;
+}*/
+
+#ifdef CONFIG_OPLUS_CHARGER_MTK
+#define AUTH_MESSAGE_LEN		20
+#define AUTH_TAG "ogauge_auth="
+static int get_auth_msg(u8 *source, u8 *rst) {
+	char *str = NULL;
+	int i;
+	str = strstr(boot_command_line, AUTH_TAG);
+	if (str == NULL) {
+		pr_err("Asynchronous authentication is not supported!!!\n");
+		return -1;
+	}
+	pr_info("%s\n", str);
+	str += strlen(AUTH_TAG);
+	for (i = 0; i < AUTH_MESSAGE_LEN; i++) {
+		source[i] = (str[2 * i ] - 64) | ((str[2 * i + 1] - 64) << 4);
+		pr_info("source index %d = %x\n", i, source[i]);
+	}
+	str += AUTH_MESSAGE_LEN * 2;
+	for (i = 0; i < AUTH_MESSAGE_LEN; i++) {
+		rst[i] = (str[2 * i] - 64) | ((str[2 * i + 1] - 64) << 4);
+		pr_info("expected index %d = %x\n", i, rst[i]);
+	}
+	return 0;
+}
+#endif
+
 
 #define BLOCKDATACTRL	0X61
 #define DATAFLASHBLOCK	0X3F
@@ -2223,7 +2275,7 @@ extern UINT32 Digest_32[5];					// Result of SHA1/HMAC obtained by MCU is contai
 #define MESSAGE_LEN		20
 #define KEY_LEN			16
 
-static bool bq27541_sha1_hmac_authenticate(void)
+static int bq27541_sha1_hmac_authenticate(struct bq27541_authenticate_data *authenticate_data)
 {
 	int i;
 	int j;
@@ -2530,6 +2582,7 @@ sha1_key_1:
 	return 0;
 }*/
 
+>>>>>>> 44e082c974b3 (kernel: Fix Section mismatches)
 static void register_gauge_devinfo(struct chip_bq27541 *chip)
 {
 	int ret = 0;
