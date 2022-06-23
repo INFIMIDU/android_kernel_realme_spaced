@@ -970,7 +970,26 @@ static int bq27541_get_average_current(void)
 	return -curr;
 }
 
-static bool bq27541_sha1_hmac_authenticate(void);
+static int bq27541_sha1_hmac_authenticate(struct bq27541_authenticate_data *authenticate_data);
+
+static bool __init bq27541_get_battery_hmac(void)
+{
+	if (!gauge_ic) {
+		return true;
+	}
+
+	if(gauge_ic->batt_bq28z610) {
+		//		return bq27541_is_authenticate_OK(gauge_ic);
+		get_smem_batt_info(&auth_data, 1);
+		if (init_gauge_auth(&auth_data, gauge_ic->authenticate_data))
+			return true;
+		pr_info("%s:gauge authenticate failed, try again\n");
+		get_smem_batt_info(&auth_data, 0);
+		return init_gauge_auth(&auth_data, gauge_ic->authenticate_data);
+	} else {
+		return true;
+	}
+}
 
 static bool bq27541_get_battery_authenticate(void)
 {
@@ -979,22 +998,21 @@ static bool bq27541_get_battery_authenticate(void)
 	if (!gauge_ic) {
 		return true;
 	}
-	if(gauge_ic->batt_bq28z610) {
-		return bq27541_sha1_hmac_authenticate();
+
+	if (gauge_ic->temp_pre == 0 && get_temp == false) {
+		bq27541_get_battery_temperature();
+		msleep(10);
+		bq27541_get_battery_temperature();
+	}
+	get_temp = true;
+	if (gauge_ic->temp_pre == (-400 - ZERO_DEGREE_CELSIUS_IN_TENTH_KELVIN)) {
+		return false;
 	} else {
-		if (gauge_ic->temp_pre == 0 && get_temp == false) {
-			bq27541_get_battery_temperature();
-			msleep(10);
-			bq27541_get_battery_temperature();
-		}
-		get_temp = true;
-		if (gauge_ic->temp_pre == (-400 - ZERO_DEGREE_CELSIUS_IN_TENTH_KELVIN)) {
-			return false;
-		} else {
-			return true;
-		}
+		return true;
 	}
 }
+
+
 
 static int bq27541_get_prev_battery_mvolts(void)
 {
@@ -2330,203 +2348,100 @@ static bool bq27541_sha1_hmac_authenticate(void)
 		recv_buf[i] = recv_buf[len - i - 1];
 		recv_buf[len - i - 1] = t;
 	}
-	// step 5: phone do hmac(sha1-generic) algorithm
-	SHA1_authenticate();
-	ph = (unsigned char*)H;
-	for (i = 0; i < 5; i++) {
-		for(j = 0; j < 2; j++) {
-			t = ph[i*4 + j];
-			ph[i*4 + j] = ph[i*4 + 3 - j];
-			ph[i*4 + 3 -j] = t;
-		}
+#ifdef XBL_AUTH_DEBUG
+	for (i = 0; i < GAUGE_AUTH_MSG_LEN - 3; i = i + 4) {
+		pr_info("%s: hw[%d]=%x,hw[%d]=%x,hw[%d]=%x,hw[%d]=%x\n", __func__,
+			i,recv_buf[i],i+1,recv_buf[i+1],i+2,recv_buf[i+2],i+3,recv_buf[i+3]);
 	}
-
-#ifndef SHA1_DBG
-	chg_err("HMAC: \n");
-	for (i = 0; i < 20; i++)
-		chg_err("%02x \n", ph[i]);
 #endif
-
-#ifdef SHA1_DBG
-	chg_err("EXPRET: \n");
-	for (i = 0; i < 20; ++i) {
-		chg_err("%02x \n", exp_result[i]);
+	memcpy(authenticate_data->message, &recv_buf[0], authenticate_data->message_len);
+#ifdef XBL_AUTH_DEBUG
+	for (i = 0; i < authenticate_data->message_len; i++) {
+		pr_err("HW_sha1_hmac_result[0x%x]", authenticate_data->message[i]);
 	}
-	ret = strncmp(ph, exp_result, sizeof(exp_result));//ret = memcmp(ph, exp_result, sizeof(exp_result));
-	if(ret != 0)
-		chg_err("RESULT:Mismatch\n");
-	else
-		chg_err("RESULT:Match\n");
 #endif
+	return 0;
+}
 
-#ifndef SHA1_DBG
-	chg_err("recv_buf: \n");
-	for(i = 0;i < 20;i++) {
-		chg_err("%02x \n", recv_buf[i]);
-	}
-	#endif
-	// step 6: compare recv_buf from bq27541 and result by phone
-	ret = strncmp(ph,recv_buf,MESSAGE_LEN);
-	if(ret == 0) {
-		chg_err("bq27541_authenticate1 success\n");
+static __init bool get_smem_batt_info(oplus_gauge_auth_result *auth, int kk) {
+#ifdef CONFIG_OPLUS_CHARGER_MTK
+	int ret = 0;
+
+	ret = get_auth_msg(auth->msg, auth->rcv_msg);
+	if (ret == 0) {
 		return true;
-	}
-
-#ifdef SHA1_DBG
-	memset(exp_result, 0, 20);
-	memset(mmm, 0, 20);
-#endif
-sha1_key_1:
-	//A=B=C1=D=E=0;
-	memset(Message, 0, RANDMESGNUMBYTES);
-	//memset(Ws, 0, 80);
-	//memset(Random, 0, 5);
-	memset(Digest_32, 0, 5);
-	memset(H, 0, 5);
-	i = j = ret = len = 0;
-	memset(authen_cmd_buf, 0, 1);
-	memset(checksum_buf, 0, 1);
-	memset(recv_buf, 0, MESSAGE_LEN);
-	Key[15] = 0xa8;
-	Key[14] = 0xd5;
-	Key[13] = 0x12;
-	Key[12] = 0xfb;
-	Key[11] = 0x18;
-	Key[10] = 0xa2;
-	Key[ 9] = 0x21;
-	Key[ 8] = 0x57;
-	Key[ 7] = 0x69;
-	Key[ 6] = 0xa8;
-	Key[ 5] = 0xce;
-	Key[ 4] = 0x5f;
-	Key[ 3] = 0x20;
-	Key[ 2] = 0xec;
-	Key[ 1] = 0x1c;
-	Key[ 0] = 0xd4;
-
-	// step 0: produce 20 bytes random data and checksum
-#ifdef SHA1_DBG
-	for (i = 0; i < RANDMESGNUMBYTES; i++) {
-		Message[i] = mmm[i];
-	}
-#else
-	get_random_bytes(Message,20);
-#endif
-
-#ifndef SHA1_DBG
-	chg_err("Message: \n");
-	for (i = 0; i < RANDMESGNUMBYTES; ++i) {
-		chg_err("%02x \n", Message[i]);
-	}
-#endif
-
-	len = sizeof(Message);
-	for(i = 0; i < len / 2; i++) {
-		t = Message[i];
-		Message[i] = Message[len - i - 1];
-		Message[len - i - 1] = t;
-	}
-
-#ifdef SHA1_DBG
-	chg_err("Reversed Message: \n");
-	for (i = 0; i < RANDMESGNUMBYTES; ++i) {
-		chg_err("%02x \n", Message[i]);
-	}
-#endif
-
-	for(i = 0;i < RANDMESGNUMBYTES;i++) {
-		checksum_buf[0] = checksum_buf[0] + Message[i];
-	}
-	checksum_buf[0] = 0xff - (checksum_buf[0]&0xff);
-
-	/* step 1: unseal mode->write 0x01 to blockdatactrl
-	authen_cmd_buf[0] = 0x01;
-	ret = i2c_smbus_write_i2c_block_data(client,BLOCKDATACTRL,1,&authen_cmd_buf[0]);
-	}   */
-
-	// step 1: seal mode->write 0x00 to dataflashblock
-	ret = bq27541_i2c_txsubcmd_onebyte(DATAFLASHBLOCK, authen_cmd_buf[0]);
-	//ret = i2c_smbus_write_i2c_block_data(client,DATAFLASHBLOCK,1,&authen_cmd_buf[0]);
-	if( ret < 0 ) {
-		chg_err("%s i2c write error\n",__func__);
+	} else {
 		return false;
 	}
-	// step 2: write 20 bytes to authendata_reg
-	bq27541_write_i2c_block(AUTHENDATA, MESSAGE_LEN, &Message[0]);
-	//i2c_smbus_write_i2c_block_data(client,AUTHENDATA,MESSAGE_LEN,&Message[0]);
-	msleep(1);
-	// step 3: write checksum to authenchecksum_reg for compute
-	bq27541_i2c_txsubcmd_onebyte(AUTHENCHECKSUM, checksum_buf[0]);
-	//i2c_smbus_write_i2c_block_data(client,AUTHENCHECKSUM,1,&checksum_buf[0]);
-	msleep(3);
-	// step 4: read authendata
-	bq27541_read_i2c_block(AUTHENDATA, MESSAGE_LEN, &recv_buf[0]);
-	//i2c_smbus_read_i2c_block_data(client,AUTHENDATA,MESSAGE_LEN,&recv_buf[0]);
-	len = MESSAGE_LEN;
-	for(i = 0; i < len / 2; i++) {
-		t = recv_buf[i];
-		recv_buf[i] = recv_buf[len - i - 1];
-		recv_buf[len - i - 1] = t;
+#else
+	size_t smem_size;
+	void *smem_addr;
+	oplus_gauge_auth_info_type *smem_data;
+	int i;
+	if (NULL == auth) {
+		pr_err("%s: invalid parameters\n", __func__);
+		return false;
 	}
-	// step 5: phone do hmac(sha1-generic) algorithm
-	SHA1_authenticate();
-	ph = (unsigned char*)H;
-	for (i = 0; i < 5; i++) {
-		for(j = 0; j < 2; j++) {
-		t = ph[i*4 + j];
-		ph[i*4 + j] = ph[i*4 + 3 - j];
-		ph[i*4 + 3 -j] = t;
+
+	memset(auth, 0, sizeof(oplus_gauge_auth_result));
+	smem_addr = qcom_smem_get(QCOM_SMEM_HOST_ANY, SMEM_RESERVED_BOOT_INFO_FOR_APPS, &smem_size);
+	if (IS_ERR(smem_addr)) {
+		pr_err("unable to acquire smem SMEM_RESERVED_BOOT_INFO_FOR_APPS entry\n");
+		return false;
+	} else {
+		smem_data = (oplus_gauge_auth_info_type *)smem_addr;
+		if (smem_data == ERR_PTR(-EPROBE_DEFER)) {
+			smem_data = NULL;
+			pr_info("fail to get smem_data\n");
+			return false;
+		} else {
+			if (0 == kk) {
+				memcpy(auth, &smem_data->rst_k0, sizeof(oplus_gauge_auth_result));
+			} else {
+				memcpy(auth, &smem_data->rst_k1, sizeof(oplus_gauge_auth_result));
+				pr_info("%s: auth result=%d\n", __func__, auth->result);
+
+#ifdef XBL_AUTH_DEBUG
+				for (i = 0; i < GAUGE_AUTH_MSG_LEN - 3; i = i + 4) {
+					pr_info("%s: msg[%d]=%x,msg[%d]=%x,msg[%d]=%x,msg[%d]=%x\n", __func__,
+						i,auth->msg[i],i+1,auth->msg[i+1],i+2,auth->msg[i+2],i+3,auth->msg[i+3]);
+				}
+				for (i = 0; i < GAUGE_AUTH_MSG_LEN - 3; i = i + 4) {
+					pr_info("%s: rcv_msg[%d]=%x,rcv_msg[%d]=%x,rcv_msg[%d]=%x,rcv_msg[%d]=%x\n", __func__,
+						i,auth->rcv_msg[i],i+1,auth->rcv_msg[i+1],i+2,auth->rcv_msg[i+2],i+3,auth->rcv_msg[i+3]);
+				}
+#endif
+			}
 		}
 	}
-
-#ifndef SHA1_DBG
-	chg_err("HMAC: \n");
-	for (i = 0; i < 20; i++) {
-		chg_err("%02x \n", ph[i]);
-	}
+	return true;
 #endif
+}
 
-#ifdef SHA1_DBG
-	chg_err("EXPRET: \n");
-	for (i = 0; i < 20; ++i) {
-		chg_err("%02x \n", exp_result[i]);
-	}
-	ret = strncmp(ph, exp_result, sizeof(exp_result));//ret = memcmp(ph, exp_result, sizeof(exp_result));
-	if(ret != 0) {
-		chg_err("RESULT:Mismatch\n");
-	} else {
-		chg_err("RESULT:Match\n");
-	}
-#endif
+static bool init_gauge_auth(oplus_gauge_auth_result *rst, struct bq27541_authenticate_data *authenticate_data) {
 
-#ifndef SHA1_DBG
-	chg_err("recv_buf: \n");
-	for(i = 0;i < 20;i++) {
-		chg_err("%02x \n", recv_buf[i]);
+	int len = GAUGE_AUTH_MSG_LEN < AUTHEN_MESSAGE_MAX_COUNT	? GAUGE_AUTH_MSG_LEN : AUTHEN_MESSAGE_MAX_COUNT; 
+	if (NULL == rst || NULL == authenticate_data) {
+		pr_err("Gauge authenticate failed\n");
+		return false; 
 	}
-#endif
-
-	// step 6: compare recv_buf from bq27541 and result by phone
-	ret = strncmp(ph,recv_buf,MESSAGE_LEN);
-	if(ret == 0) {
-		chg_err("bq27541_authenticate2 success\n");
+	/*//comment for keeping authenticattion in kernel
+	if (rst->result) {
+		pr_err("Gauge authenticate succeed from xbl\n");
 		return true;
 	}
-	chg_err("bq27541_authenticate error,dump buf:\n");
-	return false;
-}
 #endif
 
-/*static int bq28z610_get_2cell_balance_time(void)
-{
-	u8 balance_time[BQ28Z610_MAC_CELL_BALANCE_TIME_SIZE] = {0,0,0,0};
-	bq27541_i2c_txsubcmd(BQ28Z610_MAC_CELL_BALANCE_TIME_EN_ADDR, BQ28Z610_MAC_CELL_BALANCE_TIME_CMD);
-	usleep_range(1000, 1000);
-	bq27541_read_i2c_block(BQ28Z610_MAC_CELL_BALANCE_TIME_ADDR, BQ28Z610_MAC_CELL_BALANCE_TIME_SIZE, balance_time);
-	pr_err("Cell_balance_time_remaining1 = %dS, Cell_balance_time_remaining2 = %dS\n", 
-	(balance_time[1] << 8) | balance_time[0], (balance_time[3] << 8) | balance_time[2]);
-	return 0;
-}*/
+	if (strncmp(authenticate_data->message, rst->rcv_msg, len)) {
+		pr_err("Gauge authenticate compare failed\n");
+		return false;
+	} else {
+		pr_err("Gauge authenticate succeed\n");
+		authenticate_data->result = 1;
+		rst->result = 1;
+	}
+	return true;
+}
 
 static void register_gauge_devinfo(struct chip_bq27541 *chip)
 {
