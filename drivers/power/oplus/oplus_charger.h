@@ -194,10 +194,8 @@
 #define TEMPERATURE_INVALID	-2740
 
 #define chg_debug(fmt, ...) \
-        printk(KERN_NOTICE "[OPLUS_CHG][%s]"fmt, __func__, ##__VA_ARGS__)
 
 #define chg_err(fmt, ...) \
-        printk(KERN_ERR "[OPLUS_CHG][%s]"fmt, __func__, ##__VA_ARGS__)
 
 #ifdef CONFIG_OPLUS_CHARGER_MTK6769
 /*Liu.Yong@@RM.CM.BSP.CHG 2020/08/22, Add charger code*/
