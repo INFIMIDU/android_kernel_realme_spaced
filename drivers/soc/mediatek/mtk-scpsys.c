@@ -407,18 +407,19 @@ static int scpsys_power_on(struct generic_pm_domain *genpd)
 		ret = scpsys_clk_enable(scpd->subsys_clk, MAX_SUBSYS_CLKS);
 		if (ret < 0)
 			goto err_pwr_ack;
-	} else {
-		ret = scpsys_clk_enable(scpd->subsys_clk, MAX_SUBSYS_CLKS);
-		if (ret < 0)
+		}
+
+		cpu_relax();
+
+		if (time_after(jiffies, timeout))
+			expired = true;
+	}
+
+	if (scpd->data->bus_prot_mask) {
+		ret = mtk_infracfg_clear_bus_protection(scp->infracfg,
+				scpd->data->bus_prot_mask);
+		if (ret)
 			goto err_pwr_ack;
-
-		ret = scpsys_sram_enable(scpd, ctl_addr);
-		if (ret < 0)
-			goto err_sram;
-
-		ret = scpsys_bus_protect_disable(scpd);
-		if (ret < 0)
-			goto err_sram;
 	}
 
 	return 0;
@@ -455,10 +456,12 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 		goto out;
 	}
 
-	ret = scpsys_clk_disable(scpd->subsys_clk, MAX_SUBSYS_CLKS);
+		cpu_relax();
 
-	/* subsys power off */
-	val = readl(ctl_addr);
+		if (time_after(jiffies, timeout))
+			expired = true;
+	}
+
 	val |= PWR_ISO_BIT;
 	writel(val, ctl_addr);
 
@@ -482,9 +485,17 @@ static int scpsys_power_off(struct generic_pm_domain *genpd)
 		goto out;
 	}
 
-	scpsys_clk_disable(scpd->clk, MAX_CLKS);
+		cpu_relax();
 
-	scpsys_regulator_disable(scpd);
+		if (time_after(jiffies, timeout))
+			expired = true;
+	}
+
+	for (i = 0; i < MAX_CLKS && scpd->clk[i]; i++)
+		clk_disable_unprepare(scpd->clk[i]);
+
+	if (scpd->supply)
+		regulator_disable(scpd->supply);
 
 	return 0;
 
@@ -497,60 +508,13 @@ out:
 static int init_subsys_clks(struct platform_device *pdev,
 		const char *prefix, struct clk **clk)
 {
-	struct device_node *node = pdev->dev.of_node;
-	u32 prefix_len, sub_clk_cnt = 0;
-	int str_sz, clk_idx, ret;
+	struct generic_pm_domain *genpd;
+	struct scp_domain *scpd;
 
-	if (!node) {
-		dev_err(&pdev->dev, "Cannot find scpsys node: %ld\n",
-			PTR_ERR(node));
-		return PTR_ERR(node);
-	}
+	genpd = pd_to_genpd(dev->pm_domain);
+	scpd = container_of(genpd, struct scp_domain, genpd);
 
-	str_sz = of_property_count_strings(node, "clock-names");
-	if (str_sz < 0) {
-		dev_err(&pdev->dev, "Cannot get any subsys strings: %d\n",
-				str_sz);
-		return str_sz;
-	}
-
-	prefix_len = strlen(prefix);
-
-	for (clk_idx = 0; clk_idx < str_sz; clk_idx++) {
-		const char *clk_name;
-
-		ret = of_property_read_string_index(node, "clock-names",
-					clk_idx, &clk_name);
-		if (ret < 0) {
-			dev_err(&pdev->dev,
-					"Cannot read subsys string[%d]: %d\n",
-					clk_idx, ret);
-			return ret;
-		}
-
-		if (!strncmp(clk_name, prefix, prefix_len) &&
-				(clk_name[prefix_len] == '-')) {
-			if (sub_clk_cnt >= MAX_SUBSYS_CLKS) {
-				dev_err(&pdev->dev,
-					"subsys clk out of range %d\n",
-					sub_clk_cnt);
-				return -ENOMEM;
-			}
-
-			clk[sub_clk_cnt] = devm_clk_get(&pdev->dev,
-						clk_name);
-
-			if (IS_ERR(clk[sub_clk_cnt])) {
-				dev_err(&pdev->dev,
-					"Subsys clk read fail %ld\n",
-					PTR_ERR(clk[sub_clk_cnt]));
-				return PTR_ERR(clk[sub_clk_cnt]);
-			}
-			sub_clk_cnt++;
-		}
-	}
-
-	return sub_clk_cnt;
+	return scpd->data->active_wakeup;
 }
 
 static void init_clks(struct platform_device *pdev, struct clk **clk)
@@ -719,6 +683,7 @@ static void mtk_register_power_domains(struct platform_device *pdev,
 	for (i = 0; i < num; i++) {
 		struct scp_domain *scpd = &scp->domains[i];
 		struct generic_pm_domain *genpd = &scpd->genpd;
+		bool on;
 
 		if (MTK_SCPD_CAPS(scpd, MTK_SCPD_KEEP_DEFAULT_OFF)) {
 			if (scpsys_domain_is_on(scpd)) {
@@ -734,10 +699,9 @@ static void mtk_register_power_domains(struct platform_device *pdev,
 		 * software.  The unused domains will be switched off during
 		 * late_init time.
 		 */
-			genpd->power_on(genpd);
+		on = !WARN_ON(genpd->power_on(genpd) < 0);
 
-			pm_genpd_init(genpd, NULL, false);
-		}
+		pm_genpd_init(genpd, NULL, !on);
 	}
 
 	/*
@@ -762,8 +726,7 @@ static const struct scp_domain_data scp_domain_data_mt2701[] = {
 		.name = "conn",
 		.sta_mask = PWR_STATUS_CONN,
 		.ctl_offs = SPM_CONN_PWR_CON,
-		.bus_prot_mask = MT2701_TOP_AXI_PROT_EN_CONN_M |
-				 MT2701_TOP_AXI_PROT_EN_CONN_S,
+		.bus_prot_mask = 0x0104,
 		.clk_id = {CLK_NONE},
 		.caps = MTK_SCPD_ACTIVE_WAKEUP,
 	},
