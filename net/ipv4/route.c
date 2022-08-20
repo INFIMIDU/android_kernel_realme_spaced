@@ -70,6 +70,7 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/bootmem.h>
 #include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -485,8 +486,10 @@ static void ipv4_confirm_neigh(const struct dst_entry *dst, const void *daddr)
 	__ipv4_confirm_neigh(dev, *(__force u32 *)pkey);
 }
 
-#define IP_IDENTS_SZ 2048u
-
+/* Hash tables of size 2048..262144 depending on RAM size.
+ * Each bucket uses 8 bytes.
+ */
+static u32 ip_idents_mask __read_mostly;
 static atomic_t *ip_idents __read_mostly;
 static u32 *ip_tstamps __read_mostly;
 
@@ -496,11 +499,15 @@ static u32 *ip_tstamps __read_mostly;
  */
 u32 ip_idents_reserve(u32 hash, int segs)
 {
-	u32 *p_tstamp = ip_tstamps + hash % IP_IDENTS_SZ;
-	atomic_t *p_id = ip_idents + hash % IP_IDENTS_SZ;
-	u32 old = ACCESS_ONCE(*p_tstamp);
-	u32 now = (u32)jiffies;
+	u32 bucket, old, now = (u32)jiffies;
+	atomic_t *p_id;
+	u32 *p_tstamp;
 	u32 delta = 0;
+
+	bucket = hash & ip_idents_mask;
+	p_tstamp = ip_tstamps + bucket;
+	p_id = ip_idents + bucket;
+	old = ACCESS_ONCE(*p_tstamp);
 
 	if (old != now && cmpxchg(p_tstamp, old, now) == old)
 		delta = prandom_u32_max(now - old);
@@ -612,28 +619,35 @@ static void fnhe_flush_routes(struct fib_nh_exception *fnhe)
 	}
 }
 
-static struct fib_nh_exception *fnhe_oldest(struct fnhe_hash_bucket *hash)
+static void fnhe_remove_oldest(struct fnhe_hash_bucket *hash)
 {
-	struct fib_nh_exception *fnhe, *oldest;
+	struct fib_nh_exception __rcu **fnhe_p, **oldest_p;
+	struct fib_nh_exception *fnhe, *oldest = NULL;
 
-	oldest = rcu_dereference(hash->chain);
-	for (fnhe = rcu_dereference(oldest->fnhe_next); fnhe;
-	     fnhe = rcu_dereference(fnhe->fnhe_next)) {
-		if (time_before(fnhe->fnhe_stamp, oldest->fnhe_stamp))
+	for (fnhe_p = &hash->chain; ; fnhe_p = &fnhe->fnhe_next) {
+		fnhe = rcu_dereference_protected(*fnhe_p,
+						 lockdep_is_held(&fnhe_lock));
+		if (!fnhe)
+			break;
+		if (!oldest ||
+		    time_before(fnhe->fnhe_stamp, oldest->fnhe_stamp)) {
 			oldest = fnhe;
+			oldest_p = fnhe_p;
+		}
 	}
 	fnhe_flush_routes(oldest);
-	return oldest;
+	*oldest_p = oldest->fnhe_next;
+	kfree_rcu(oldest, rcu);
 }
 
-static inline u32 fnhe_hashfun(__be32 daddr)
+static u32 fnhe_hashfun(__be32 daddr)
 {
-	static u32 fnhe_hashrnd __read_mostly;
-	u32 hval;
+	static siphash_key_t fnhe_hash_key __read_mostly;
+	u64 hval;
 
-	net_get_random_once(&fnhe_hashrnd, sizeof(fnhe_hashrnd));
-	hval = jhash_1word((__force u32) daddr, fnhe_hashrnd);
-	return hash_32(hval, FNHE_HASH_SHIFT);
+	net_get_random_once(&fnhe_hash_key, sizeof(fnhe_hash_key));
+	hval = siphash_1u32((__force u32)daddr, &fnhe_hash_key);
+	return hash_64(hval, FNHE_HASH_SHIFT);
 }
 
 static void fill_route_from_fnhe(struct rtable *rt, struct fib_nh_exception *fnhe)
@@ -700,22 +714,29 @@ static void update_or_create_fnhe(struct fib_nh *nh, __be32 daddr, __be32 gw,
 		if (rt)
 			fill_route_from_fnhe(rt, fnhe);
 	} else {
-		if (depth > FNHE_RECLAIM_DEPTH)
-			fnhe = fnhe_oldest(hash);
-		else {
-			fnhe = kzalloc(sizeof(*fnhe), GFP_ATOMIC);
-			if (!fnhe)
-				goto out_unlock;
+		/* Randomize max depth to avoid some side channels attacks. */
+		int max_depth = FNHE_RECLAIM_DEPTH +
+				prandom_u32_max(FNHE_RECLAIM_DEPTH);
 
-			fnhe->fnhe_next = hash->chain;
-			rcu_assign_pointer(hash->chain, fnhe);
+		while (depth > max_depth) {
+			fnhe_remove_oldest(hash);
+			depth--;
 		}
+
+		fnhe = kzalloc(sizeof(*fnhe), GFP_ATOMIC);
+		if (!fnhe)
+			goto out_unlock;
+
+		fnhe->fnhe_next = hash->chain;
+
 		fnhe->fnhe_genid = genid;
 		fnhe->fnhe_daddr = daddr;
 		fnhe->fnhe_gw = gw;
 		fnhe->fnhe_pmtu = pmtu;
 		fnhe->fnhe_mtu_locked = lock;
 		fnhe->fnhe_expires = max(1UL, expires);
+
+		rcu_assign_pointer(hash->chain, fnhe);
 
 		/* Exception created; mark the cached routes for the nexthop
 		 * stale, so anyone caching it rechecks if this exception
@@ -1251,7 +1272,6 @@ static int ip_rt_bug(struct net *net, struct sock *sk, struct sk_buff *skb)
    We do not cache source address of outgoing interface,
    because it is used only by IP RR, TS and SRR options,
    so that it out of fast path.
-
    BTW remember: "addr" is allowed to be not aligned
    in IP options!
  */
@@ -1424,7 +1444,7 @@ static bool rt_bind_exception(struct rtable *rt, struct fib_nh_exception *fnhe,
 			dst_hold(&rt->dst);
 			rcu_assign_pointer(*porig, rt);
 			if (orig) {
-				rt_add_uncached_list(orig);
+				dst_dev_put(&orig->dst);
 				dst_release(&orig->dst);
 			}
 			ret = true;
@@ -1444,7 +1464,7 @@ struct uncached_list {
 
 static DEFINE_PER_CPU_ALIGNED(struct uncached_list, rt_uncached_list);
 
-static void rt_add_uncached_list(struct rtable *rt)
+void rt_add_uncached_list(struct rtable *rt)
 {
 	struct uncached_list *ul = raw_cpu_ptr(&rt_uncached_list);
 
@@ -1485,32 +1505,8 @@ static bool rt_cache_route(struct fib_nh *nh, struct rtable *rt)
 	return ret;
 }
 
-struct uncached_list {
-	spinlock_t		lock;
-	struct list_head	head;
-};
-
-static DEFINE_PER_CPU_ALIGNED(struct uncached_list, rt_uncached_list);
-
-static void rt_add_uncached_list(struct rtable *rt)
+void rt_del_uncached_list(struct rtable *rt)
 {
-	struct uncached_list *ul = raw_cpu_ptr(&rt_uncached_list);
-
-	rt->rt_uncached_list = ul;
-
-	spin_lock_bh(&ul->lock);
-	list_add_tail(&rt->rt_uncached, &ul->head);
-	spin_unlock_bh(&ul->lock);
-}
-
-static void ipv4_dst_destroy(struct dst_entry *dst)
-{
-	struct dst_metrics *p = (struct dst_metrics *)DST_METRICS_PTR(dst);
-	struct rtable *rt = (struct rtable *) dst;
-
-	if (p != &dst_default_metrics && refcount_dec_and_test(&p->refcnt))
-		kfree(p);
-
 	if (!list_empty(&rt->rt_uncached)) {
 		struct uncached_list *ul = rt->rt_uncached_list;
 
@@ -1518,6 +1514,17 @@ static void ipv4_dst_destroy(struct dst_entry *dst)
 		list_del(&rt->rt_uncached);
 		spin_unlock_bh(&ul->lock);
 	}
+}
+
+static void ipv4_dst_destroy(struct dst_entry *dst)
+{
+	struct dst_metrics *p = (struct dst_metrics *)DST_METRICS_PTR(dst);
+	struct rtable *rt = (struct rtable *)dst;
+
+	if (p != &dst_default_metrics && refcount_dec_and_test(&p->refcnt))
+		kfree(p);
+
+	rt_del_uncached_list(rt);
 }
 
 void rt_flush_dev(struct net_device *dev)
@@ -2478,7 +2485,6 @@ struct rtable *ip_route_output_key_hash_rcu(struct net *net, struct flowi4 *fl4,
 		    !netif_index_is_l3_master(net, fl4->flowi4_oif))) {
 			/* Apparently, routing tables are wrong. Assume,
 			   that the destination is on link.
-
 			   WHY? DW.
 			   Because we are allowed to send to iface
 			   even if it has NO routes and NO assigned
@@ -2488,8 +2494,6 @@ struct rtable *ip_route_output_key_hash_rcu(struct net *net, struct flowi4 *fl4,
 			   direct. Moreover, if MSG_DONTROUTE is set,
 			   we send packet, ignoring both routing tables
 			   and ifaddr state. --ANK
-
-
 			   We could make it even if oif is unknown,
 			   likely IPv6, but we do not.
 			 */
@@ -3116,18 +3120,26 @@ struct ip_rt_acct __percpu *ip_rt_acct __read_mostly;
 
 int __init ip_rt_init(void)
 {
+	void *idents_hash;
 	int rc = 0;
 	int cpu;
 
-	ip_idents = kmalloc(IP_IDENTS_SZ * sizeof(*ip_idents), GFP_KERNEL);
-	if (!ip_idents)
-		panic("IP: failed to allocate ip_idents\n");
+	/* For modern hosts, this will use 2 MB of memory */
+	idents_hash = alloc_large_system_hash("IP idents",
+					      sizeof(*ip_idents) + sizeof(*ip_tstamps),
+					      0,
+					      16, /* one bucket per 64 KB */
+					      HASH_ZERO,
+					      NULL,
+					      &ip_idents_mask,
+					      2048,
+					      256*1024);
 
-	prandom_bytes(ip_idents, IP_IDENTS_SZ * sizeof(*ip_idents));
+	ip_idents = idents_hash;
 
-	ip_tstamps = kcalloc(IP_IDENTS_SZ, sizeof(*ip_tstamps), GFP_KERNEL);
-	if (!ip_tstamps)
-		panic("IP: failed to allocate ip_tstamps\n");
+	prandom_bytes(ip_idents, (ip_idents_mask + 1) * sizeof(*ip_idents));
+
+	ip_tstamps = idents_hash + (ip_idents_mask + 1) * sizeof(*ip_idents);
 
 	for_each_possible_cpu(cpu) {
 		struct uncached_list *ul = &per_cpu(rt_uncached_list, cpu);
