@@ -367,7 +367,9 @@ int fscrypt_fname_disk_to_usr(const struct inode *inode,
 	if (iname->len < FS_CRYPTO_BLOCK_SIZE)
 		return -EUCLEAN;
 
-	if (fscrypt_has_encryption_key(inode))
+    if (inode->i_crypt_info)
+		return fname_decrypt(inode, iname, oname); 
+
 		return fname_decrypt(inode, iname, oname);
 
 	if (iname->len <= FSCRYPT_FNAME_MAX_UNDIGESTED_SIZE) {
